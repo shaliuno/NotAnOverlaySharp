@@ -18,15 +18,7 @@ using System.Threading.Tasks;
 
 namespace NotAnOverlaySharp
 {
-    public static class Program
+    class PerfManager
     {
-        [STAThread]
-        private static void Main()
-        {
-            NotAnOverlay notAnOverlay = new NotAnOverlay();
-            notAnOverlay.InitOverlay();
-            //Console.WriteLine("Press any key...");
-            //Console.Read();
-        }
     }
 }
