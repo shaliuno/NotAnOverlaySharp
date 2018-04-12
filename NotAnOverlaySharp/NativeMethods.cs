@@ -349,10 +349,10 @@ namespace NotAnOverlaySharp
         [DllImport("kernel32.dll")]
         internal static extern uint GetLastError();
 
-        //[DllImport("kernel32.dll", EntryPoint = "RtlSecureZeroMemory")]
-        //internal static extern void SecureZeroMemory(IntPtr ptr, IntPtr cnt);
+        // [DllImport("kernel32.dll", EntryPoint = "RtlSecureZeroMemory")]
+        // internal static extern void SecureZeroMemory(IntPtr ptr, IntPtr cnt);
 
-        [DllImport("user32.dll")] ///, EntryPoint = "GetDesktopWindow")] remember :D
+        [DllImport("user32.dll")]
         internal static extern HWND GetDesktopWindow();
 
         [DllImport("user32.dll", EntryPoint = "FindWindowA")]
@@ -424,6 +424,9 @@ namespace NotAnOverlaySharp
 
         [DllImport("user32.dll")]
         internal static extern IntPtr DefWindowProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        internal static extern int ClientToScreen(HWND hwnd, out POINT point);
 
         [DllImport("gdi32.dll")]
         internal static extern HBITMAP CreateCompatibleBitmap(HDC hdc, int nWidth, int nHeight);

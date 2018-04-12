@@ -11,6 +11,7 @@
 #endregion License
 
 using System;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 /* Почитать
@@ -35,6 +36,7 @@ namespace NotAnOverlaySharp
         private const int PM_REMOVE = 0x0001;
         private const int CW_USEDEFAULT = unchecked((int)0x80000000);
 
+        // TODO fullscreen borderless on dclick
         const uint WM_DESTROY = 2;
         const uint WM_PAINT = 0x0f;
         const uint WM_LBUTTONUP = 0x0202;
@@ -43,12 +45,11 @@ namespace NotAnOverlaySharp
         /// https://github.com/jonkoops/pirate/tree/master/XPTable/Win32
         /// https://www.pinvoke.net/default.aspx/Enums.WindowStyles
 
-        private HANDLE m_hThreadNotAnOverlay;
+        private HWND m_captureTarget;
         private HWND m_hwndNotOverlay;
         private POINT m_screenResolution;
 
-        private RECT m_windowSize; /// keep for now
-        private PAINTSTRUCT m_paintStruct;
+        private RECT m_windowSize;
         private HDC m_hdcSource;
         private HDC m_hdcDestination;
         private HDC m_hdcSrcTemp;
@@ -59,16 +60,42 @@ namespace NotAnOverlaySharp
 
         private WndProc delegWndProc = myWndProc;
 
-        public NotAnOverlay()
-        {
-            //HWND hwnd = IntPtr.Zero; // Full screen not matter what is open
-            HWND hwnd = NativeMethods.GetDesktopWindow(); // Currently active window
-            //HWND hwnd = NativeMethods.GetForegroundWindow(); // Currently active window
+        /* This is calculated to remove window caption,border and invisible border of int 3 for the border, which isn't included in the size returned by $SM_CYCAPTION from the capture.
+            There are several ways to get it.
+            Using GetSystemMetrics
+            Using GetThemeSysSize
+            But I`m afraid different Win version could make different values. I doubt that Win7 or less will be used but I decided to use different way.
 
-            /// HWND hwnd = NativeMethods.FindWindow("Notepad", "Untitled - Notepad"); // Specified window
-            m_hdcSource = NativeMethods.GetDC(hwnd);
+            I use this one via ClientToScreen:
+            https://stackoverflow.com/questions/21566307/how-to-get-the-title-bar-height-and-width-for-aero-and-basic-design
+        */
+
+        private int windowMetricsCorrectionX;
+        private int windowMetriscCorrectionY;
+
+        // For equal scaling.
+        private double scaleAspectRatio;
+
+        public NotAnOverlay(string processName = "")
+        {
+            if (processName != "")
+            {
+                Console.WriteLine("NotAnOverlay\t\tGetting handle for: {0}", processName);
+                m_captureTarget = WinGetHandle(processName);
+            }
+            else
+            {
+                m_captureTarget = NativeMethods.GetDesktopWindow();                               // Primary monitor screen
+
+                /// m_captureTarget = NativeMethods.GetForegroundWindow();                        // Currently active window
+                /// m_captureTarget = IntPtr.Zero;                                                // Full screen not matter what is open
+                /// m_captureTarget = NativeMethods.FindWindow("Notepad", "Untitled - Notepad");  // Specified window
+            }
+
+            // What to capture.
+            m_hdcSource = NativeMethods.GetDC(m_captureTarget);
             m_hdcSrcTemp = NativeMethods.CreateCompatibleDC(m_hdcSource);
-            Console.WriteLine("NotAnOverlay : Constructor : hwnd " + hwnd.Handle.ToString());
+            Console.WriteLine("NotAnOverlay\t\tConstructor : m_captureTarget.hwnd {0} ", m_captureTarget.Handle.ToString());
         }
 
         ~NotAnOverlay()
@@ -80,6 +107,7 @@ namespace NotAnOverlaySharp
             NativeMethods.DeleteDC(m_hdcSrcTemp);
             NativeMethods.ReleaseDC(IntPtr.Zero, m_hdcSource);
         }
+
         /* StretchBlt() Modes */
         internal enum StretchBltModes
         {
@@ -90,11 +118,11 @@ namespace NotAnOverlaySharp
             MAXSTRETCHBLTMODE = 4,
         }
 
-        public void InitOverlay()
+        public void InitOverlay(bool useCaptureTargetSize)
         {
-            if (!GetScreenResolution())
+            if (!GetScreenResolution(useCaptureTargetSize))
             {
-                Console.WriteLine("Unable to get screen resolution. NotAnOverlay.cs:161");
+                Console.WriteLine("InitOverlay\t\tUnable to get screen resolution.");
                 return;
             }
 
@@ -103,22 +131,67 @@ namespace NotAnOverlaySharp
             while (true)
             {
                 ///    perfs.AddTick();
-                CloneArea(0, 0, m_screenResolution.x, m_screenResolution.y);
+                CloneArea(0, 0, m_screenResolution.x, m_screenResolution.y, true);
                 TreatWindowMessageQueue();
             }
         }
 
-        private bool GetScreenResolution()
+        public IntPtr WinGetHandle(string wName)
         {
-            HWND hDesktop = NativeMethods.GetDesktopWindow();
+            IntPtr hwnd = IntPtr.Zero;
+            foreach (Process pList in Process.GetProcesses())
+            {
+                Console.WriteLine(pList.MainWindowTitle.ToString());
+                if ((pList.MainWindowTitle.ToLower()).Contains(wName.ToLower()) && !pList.ToString().Contains("(dwm)"))
+                {
+                    Console.WriteLine("WinGetHandle\t\tFound window with process: {0} {1}", pList.ToString(), pList.MainWindowTitle.ToLower());
+                    hwnd = pList.MainWindowHandle;
+                }
+            }
+
+            Console.WriteLine("WinGetHandle\t\tHandle : {0}", hwnd.ToString("X"));
+            return hwnd;
+        }
+
+        private bool GetScreenResolution(bool useCaptureTargetSize)
+        {
+            // This sets resolution ('inner') of your overlay screen. That will result in upscaling, downscaling the picture. Don`t forget that window caption also add extra size and if it doesn`t fit = downscale or use borderless.
+
+            HWND hDesktop;
+
+            if (useCaptureTargetSize)
+            {
+                // If we use same resolution as our target size
+                hDesktop = m_captureTarget;
+                Console.WriteLine("GetScreenResolution\t\t : Using Capture Target size");
+            }
+            else
+            {
+                // Use whole desktop on primary screen.
+                hDesktop = NativeMethods.GetDesktopWindow();
+                Console.WriteLine("GetScreenResolution\t\t : Using desktop on primary screen");
+            }
+
+            // Get capture area.
             if (!NativeMethods.GetWindowRect(hDesktop, out RECT desktop))
             {
                 return false;
             }
 
-            m_screenResolution.x = desktop.right;
-            m_screenResolution.y = desktop.bottom;
-            Console.WriteLine("GetScreenResolution : x " + m_screenResolution.x + " : y " + m_screenResolution.y);
+            Console.WriteLine("GetScreenResolution\t\tUsing Capture Target size (m_captureTarget) : x{0} y{1} x{2} y{3}", desktop.left, desktop.top, desktop.right, desktop.bottom);
+
+            // We need to get real area of what we need to capture, excluding window title border etc. So getting the correction.
+            NativeMethods.ClientToScreen(hDesktop, out POINT pnt);
+            windowMetricsCorrectionX = (pnt.x - desktop.left) * 2; // left and right borders
+            windowMetriscCorrectionY = (pnt.y - desktop.top) + (pnt.x - desktop.left); // caption + bottom border
+
+            Console.WriteLine("GetScreenResolution\t\tResulting  windowMetricsCorrection : x{0} y{1}", windowMetricsCorrectionX, windowMetriscCorrectionY);
+
+            // Calculate the window size taking offsets from 0,0 and also applying correction.
+            m_screenResolution.x = (desktop.right - desktop.left) - windowMetricsCorrectionX;
+            m_screenResolution.y = (desktop.bottom - desktop.top) - windowMetriscCorrectionY;
+            Console.WriteLine("GetScreenResolution\t\tResulting  size (m_screenResolution) : x{0} y{1} x{2} y{3}", 0, 0, m_screenResolution.x, m_screenResolution.y);
+
             return true;
         }
 
@@ -131,8 +204,22 @@ namespace NotAnOverlaySharp
                 return IntPtr.Zero;
             }
 
-            HWND hwnd = NativeMethods.CreateWindowEx(0, windowClassName, windowTitle, (uint)(WindowStyles.WS_OVERLAPPEDWINDOW | WindowStyles.WS_VISIBLE), 0, 0, CW_USEDEFAULT, CW_USEDEFAULT, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
-            Console.WriteLine("SpawnOverlayWindow: hwnd " + hwnd.Handle.ToString());
+            HWND hwnd;
+            if (m_captureTarget != IntPtr.Zero)
+            {
+                // (uint)(WindowStyles.WS_POPUP | WindowStyles.WS_VISIBLE | WindowStyles.WS_SYSMENU) no border title etc
+                /* Also creating window with windowMetricsCorrection to match window sizes.
+                   +10 is some hardcoded offset, I don`t know how to get it right so I found it help for window size fit source to dest. */
+                hwnd = NativeMethods.CreateWindowEx(0, windowClassName, windowTitle, (uint)(WindowStyles.WS_OVERLAPPEDWINDOW | WindowStyles.WS_VISIBLE), 1977, 118, m_screenResolution.x + windowMetricsCorrectionX + 10, m_screenResolution.y + windowMetriscCorrectionY + 10, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                Console.WriteLine("Creating capture window with {0} {1}", m_screenResolution.x + 10, m_screenResolution.y + 10);
+            }
+            else
+            {
+                hwnd = NativeMethods.CreateWindowEx(0, windowClassName, windowTitle, (uint)(WindowStyles.WS_OVERLAPPEDWINDOW | WindowStyles.WS_VISIBLE), 0, 0, CW_USEDEFAULT, CW_USEDEFAULT, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                Console.WriteLine("Creating capture-default window with {0} {1}", CW_USEDEFAULT, CW_USEDEFAULT);
+            }
+
+            Console.WriteLine("SpawnOverlayWindow: hwnd " + hwnd.Handle.ToString() + " : " + (uint)(WindowStyles.WS_OVERLAPPEDWINDOW | WindowStyles.WS_VISIBLE));
 
             if (hwnd == ((IntPtr)0))
             {
@@ -148,19 +235,23 @@ namespace NotAnOverlaySharp
         {
             Console.WriteLine("RegisterWindowClass with className : " + windowClassName);
             // https://msdn.microsoft.com/en-us/library/windows/desktop/ms633577(v=vs.85).aspx
-            WNDCLASSEX wind_class = new WNDCLASSEX();
-            wind_class.cbSize = Marshal.SizeOf(typeof(WNDCLASSEX));
-            wind_class.style = (int)(ClassStyles.CS_HREDRAW | ClassStyles.CS_VREDRAW);
-            wind_class.lpfnWndProc = Marshal.GetFunctionPointerForDelegate(delegWndProc);
-            wind_class.cbClsExtra = 0;
-            wind_class.cbWndExtra = 0;
-            wind_class.hInstance = Marshal.GetHINSTANCE(GetType().Module);
-            wind_class.hIcon = NativeMethods.LoadIcon(IntPtr.Zero, (int)SystemIcons.IDI_APPLICATION);
-            wind_class.hCursor = NativeMethods.LoadCursor(IntPtr.Zero, (int)IDC_STANDARD_CURSORS.IDC_ARROW);
-            wind_class.hbrBackground = (IntPtr)COLOR.ACTIVECAPTION;
-            wind_class.lpszMenuName = windowClassName;
-            wind_class.lpszClassName = windowClassName;
-            wind_class.hIconSm = IntPtr.Zero;
+            WNDCLASSEX wind_class = new WNDCLASSEX
+            {
+                cbSize = Marshal.SizeOf(typeof(WNDCLASSEX)),
+                style = (int)(ClassStyles.CS_HREDRAW | ClassStyles.CS_VREDRAW),
+                lpfnWndProc = Marshal.GetFunctionPointerForDelegate(delegWndProc),
+                cbClsExtra = 0,
+                cbWndExtra = 0,
+                hInstance = Marshal.GetHINSTANCE(GetType().Module),
+                hIcon = NativeMethods.LoadIcon(IntPtr.Zero, (int)SystemIcons.IDI_WARNING),
+                hCursor = NativeMethods.LoadCursor(IntPtr.Zero, (int)IDC_STANDARD_CURSORS.IDC_ARROW),
+
+                // (IntPtr)COLOR.ACTIVECAPTION; Zero pointer will cause background to be 'null' that will help to avoid blinks. IntPtr.Zero
+                hbrBackground = (IntPtr)COLOR.BACKGROUND + 2,
+                lpszMenuName = windowClassName,
+                lpszClassName = windowClassName,
+                hIconSm = IntPtr.Zero
+            };
 
             ushort regResult = NativeMethods.RegisterClassEx(ref wind_class);
             Console.WriteLine("RegisterWindowClass: " + regResult);
@@ -175,24 +266,54 @@ namespace NotAnOverlaySharp
             return true;
         }
 
-        private void CloneArea(int x, int y, int w, int h)
+        private void CloneArea(int x, int y, int w, int h, bool preserveAspectRatio = false)
         {
             CaptureScreenArea(x, y, w, h, ref m_hBitmapSource);
-            NativeMethods.InvalidateRect(m_hwndNotOverlay, IntPtr.Zero, true); // Tells that the window should be repainted
-            m_hdcDestination = NativeMethods.BeginPaint(m_hwndNotOverlay, out m_paintStruct);
+
+            // Invalidate but don`t erase, it helps to avoid blinks caused by background color. We also set it to null just in case.
+            NativeMethods.InvalidateRect(m_hwndNotOverlay, IntPtr.Zero, false); // Tells that the window should be repainted
+            m_hdcDestination = NativeMethods.BeginPaint(m_hwndNotOverlay, out PAINTSTRUCT m_paintStruct);
             m_hdcDstTemp = NativeMethods.CreateCompatibleDC(m_hdcDestination);
             m_hBitmapTemp = NativeMethods.SelectObject(m_hdcDstTemp, m_hBitmapSource);
 
             // No resizing (ideal when same resolution)
-            //NativeMethods.BitBlt(m_hdcDestination, 0, 0, w, h, m_hdcDstTemp, 0, 0, SRCCOPY);
+            //// NativeMethods.BitBlt(m_hdcDestination, 0, 0, w, h, m_hdcDstTemp, 0, 0, SRCCOPY);
 
             // Resizing (ideal when resolutions are different)
             NativeMethods.GetClientRect(m_hwndNotOverlay, ref m_windowSize);
             NativeMethods.SetStretchBltMode(m_hdcDestination, (int)Enum.Parse(typeof(StretchBltModes), "COLORONCOLOR")); // Use HALFTONE for better image quality (but slower)
-            // https://www.experts-exchange.com/questions/24774563/StretchBlt-in-C-Csharp-trying-to-copy-a-bitmap-image-to-screen.html
-            NativeMethods.StretchBlt(m_hdcDestination, 0, 0, m_windowSize.right, m_windowSize.bottom, m_hdcDstTemp, x, y, w, h, SRCCOPY);
-            NativeMethods.EndPaint(m_hwndNotOverlay, ref m_paintStruct);
 
+            // https://www.experts-exchange.com/questions/24774563/StretchBlt-in-C-Csharp-trying-to-copy-a-bitmap-image-to-screen.html
+
+            if (preserveAspectRatio)
+            {
+                if (scaleAspectRatio == 0)
+                {
+                    scaleAspectRatio = Math.Round((double)w / h, 2);
+                }
+
+                int m_windowSizeNewX;
+                int m_windowSizeNewY;  
+
+                if (m_windowSize.right > m_windowSize.bottom)
+                {
+                    m_windowSizeNewY = Math.Min(m_windowSize.bottom, (int)Math.Round(m_windowSize.right / scaleAspectRatio));
+                    m_windowSizeNewX = (int)Math.Round(m_windowSizeNewY * scaleAspectRatio, 2);
+                }
+                else
+                {
+                    m_windowSizeNewX = Math.Min(m_windowSize.right, (int)Math.Round(m_windowSize.bottom * scaleAspectRatio));
+                    m_windowSizeNewY = (int)Math.Round(m_windowSizeNewX / scaleAspectRatio, 2);
+                }
+
+                NativeMethods.StretchBlt(m_hdcDestination, 0, 0, m_windowSizeNewX, m_windowSizeNewY, m_hdcDstTemp, x, y, w, h, SRCCOPY);
+            }
+            else
+            {
+                NativeMethods.StretchBlt(m_hdcDestination, 0, 0, m_windowSize.right, m_windowSize.bottom, m_hdcDstTemp, x, y, w, h, SRCCOPY);
+            }
+
+            NativeMethods.EndPaint(m_hwndNotOverlay, ref m_paintStruct);
             NativeMethods.UpdateWindow(m_hwndNotOverlay); // Force direct repaint window
 
             // Without it memory leak will occurr. C++ version needs this too.
@@ -211,14 +332,13 @@ namespace NotAnOverlaySharp
 
         private void TreatWindowMessageQueue()
         {
-            MSG msg;
-            while (NativeMethods.PeekMessage(out msg, IntPtr.Zero, 0, 0, PM_REMOVE))
+            while (NativeMethods.PeekMessage(out MSG msg, IntPtr.Zero, 0, 0, PM_REMOVE))
             {
                 NativeMethods.TranslateMessage(msg);
                 NativeMethods.DispatchMessage(msg);
             }
         }
-        
+
         private static IntPtr myWndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
         {
             switch (msg)
@@ -228,18 +348,19 @@ namespace NotAnOverlaySharp
                     break;
 
                 case WM_LBUTTONDBLCLK:
-                    //MessageBox.Show("Doubleclick");
+                    ///MessageBox.Show("Doubleclick");
                     break;
 
                 case WM_DESTROY:
-                    //DestroyWindow(hWnd);
+                    ///DestroyWindow(hWnd);
 
-                    //If you want to shutdown the application, call the next function instead of DestroyWindow
+                    // If you want to shutdown the application, call the next function instead of DestroyWindow
                     Environment.Exit(0);
                     break;
 
                 default:
                     break;
+
             }
             return NativeMethods.DefWindowProc(hWnd, msg, wParam, lParam);
         }

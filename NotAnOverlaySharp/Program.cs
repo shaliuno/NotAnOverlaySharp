@@ -11,10 +11,6 @@
 #endregion License
 
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace NotAnOverlaySharp
 {
@@ -23,10 +19,9 @@ namespace NotAnOverlaySharp
         [STAThread]
         private static void Main()
         {
-            NotAnOverlay notAnOverlay = new NotAnOverlay();
-            notAnOverlay.InitOverlay();
-            //Console.WriteLine("Press any key...");
-            //Console.Read();
+            NotAnOverlay notAnOverlay = new NotAnOverlay();// "BlueStacks App Player");
+            notAnOverlay.InitOverlay(true);
+            Console.Read();
         }
     }
 }
